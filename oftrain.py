@@ -114,20 +114,97 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# poor man's data loader
+# # poor man's data loader
+# data_dir = os.path.join('data', dataset)
+# train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+# val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+# def get_batch(split):
+#     data = train_data if split == 'train' else val_data
+#     ix = torch.randint(len(data) - block_size, (batch_size,))
+#     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+#     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+#     if device_type == 'cuda':
+#         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+#         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+#     else:
+#         x, y = x.to(device), y.to(device)
+#     print(f'data shape', x.shape, y.shape)
+#     return x, y
+
+import pandas as pd
+
 data_dir = os.path.join('data', dataset)
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+numpy_array_prompts = np.array([])
+prompt_end_indices = []
+numpy_array_expects = np.array([])
+def load_data():
+    df = pd.read_parquet('/media/rolly/Madrid/clc/odin_fillin1.parquet')
+
+    print(df.dtypes)
+    print(len(df))
+    padded_prompts = []
+    padded_expects = []
+
+    MaxPromptLen = 512
+    IgnoreIndex = -100
+    iPrompt = 1
+    iExpect = 2
+    ii = 0
+    for row in df.itertuples():
+        prm = row[iPrompt]
+        exp = row[iExpect]
+
+        print(f'{prm=}\n{exp=}')
+
+        pp = []
+        pp.extend(prm)
+        pp.extend(exp)
+
+        if len(pp) > MaxPromptLen:
+            pp.pop()
+            if len(pp) > MaxPromptLen:
+                print(ii, f' len(pp) > 512   {len(pp)=}')
+                exit(9)
+        else:
+            for i in range(MaxPromptLen - len(pp)):
+                pp.append(IgnoreIndex)
+
+        pe = [IgnoreIndex for i in range(1, len(prm))]
+        pe.extend(exp)
+        if len(pe) > MaxPromptLen:
+            print(ii, f' len(pe) > 512   {len(pe)=}')
+            exit(9)
+        else:
+            for i in range(MaxPromptLen - len(pe)):
+                pe.append(IgnoreIndex)
+        
+        print(f'{pp=}\n{pe=}')
+        padded_prompts.append(pp)
+        padded_expects.append(pe)
+        ii += 1
+        if ii > 2:
+            exit(88)
+
+    # Convert to a numpy array
+    numpy_array_prompts = np.array(padded_prompts)
+    numpy_array_expects = np.array(padded_expects)
+    print(f'loaded {len(numpy_array_prompts)=} {len(numpy_array_expects)=}')
+    return numpy_array_prompts, numpy_array_expects
+numpy_array_prompts, numpy_array_expects = load_data()
+
+
 def get_batch(split):
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+#     data = train_data if split == 'train' else val_data
+    # print(f'get_batch {len(numpy_array_prompts)=} {len(numpy_array_expects)=}')
+    ix = torch.randint(len(numpy_array_prompts), (batch_size,))
+    x = torch.stack([torch.from_numpy((numpy_array_prompts[i]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((numpy_array_expects[i]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
+    # print(f'data shape', x.shape, y.shape)
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -136,7 +213,7 @@ best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
+meta_vocab_size = 134
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
@@ -222,6 +299,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
+                # print(f'{X=}\n{Y=}')
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -298,7 +376,7 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-            print(f'micro_step {logits.shape=} {loss.shape=}')
+            # print(f'{X=}\n{Y=}')
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

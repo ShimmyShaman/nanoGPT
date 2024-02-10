@@ -169,6 +169,7 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         device = idx.device
+        # print(f'{idx.device=}')
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
@@ -183,8 +184,22 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
+            print(f'micro_step {idx.shape=}')
+            print(f'micro_step {idx=}')
+            print(f'micro_step {x.shape=}')
+            print(f'micro_step {x=}')
+            print(f'micro_step {targets.shape=}')
+            print(f'micro_step {targets=}')
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            print(f'micro_step {logits.shape=}')
+            print(f'micro_step {logits=}')
+            print(f'micro_step {logits.view(-1, logits.size(-1)).shape=}')
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100)
+            print(f'micro_step {loss.shape=}')
+            print(f'micro_step {loss=}')
+            print(f'micro_step {targets.view(-1).shape=}')
+            print(f'micro_step {targets.view(-1)=}')
+            exit(7)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
@@ -311,9 +326,11 @@ class GPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
+            # print(f'{idx.size()=} ')
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
+            # print(f'{logits=} ')
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

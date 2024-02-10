@@ -5,6 +5,7 @@ import os
 import pickle
 from contextlib import nullcontext
 import torch
+from torch.nn import functional as F
 import tiktoken
 from model import GPTConfig, GPT
 from odin_infill_encoder import OdinInfillEncoder, ENDOFTEXT, FIM_PREFIX, FIM_MIDDLE, FIM_SUFFIX, ENDOFPROMPT, FILENAME
@@ -166,12 +167,42 @@ numpy_array_prompts, numpy_array_expects = load_data()
 # run generation
 with torch.no_grad():
     with ctx:
-        for k in range(num_samples):
+        for k in range(1):
             ri = random.randint(0, len(numpy_array_prompts))
-            x = torch.from_numpy((numpy_array_prompts[ri]).astype(np.int64))
+            x = torch.from_numpy((numpy_array_prompts[ri]).astype(np.int64)).unsqueeze(0)
             print(f'{x}')
-            x.to(device)
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            # print(encoder.decode(y[0].tolist()))
-            print(f'{y=}')
+            x = x.to('cuda')
+
+            print(f'{x.device=}')
+            # y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+
+            y, _ = model.forward(x)
+            y[0, 0, 0] = 0.0
+            print(y)
+            print(y.shape)
             print('---------------')
+            # pluck the logits at the final step and scale by desired temperature
+            y = y[:, -1, :] / temperature
+            print(y)
+            print(y.shape)
+            top_k = 1
+            if top_k is not None:
+                v, vi = torch.topk(y, min(top_k, y.size(-1)))
+                print(f'{min(top_k, y.size(-1))=}')
+                print(f'{v=}')
+                print(f'{vi=}')
+                y[y < v[:, [-1]]] = -float('Inf')
+
+            print('-----#####------')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(y, dim=-1)
+            print(f'{probs=}')
+            p, pi = torch.topk(y, min(top_k, y.size(-1)))
+            print(f'{p=}')
+            print(f'{pi=}')
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            print(f'{idx_next=}')
+            # append sampled index to the running sequence and continue
+            x = torch.cat((x, idx_next), dim=1)
+            print(f'{x=}')
